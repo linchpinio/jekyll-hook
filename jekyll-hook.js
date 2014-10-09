@@ -9,8 +9,32 @@ var tasks   = queue(1);
 var spawn   = require('child_process').spawn;
 var email   = require('emailjs/email');
 var mailer  = email.server.connect(config.email);
+var crypto  = require('crypto');
 
-app.use(express.bodyParser());
+app.use(express.bodyParser({
+    verify: function(req,res,buffer){
+        if(!req.headers['x-hub-signature']){
+            return;
+        }
+
+        if(!config.secret || config.secret==""){
+            console.log("Recieved a X-Hub-Signature header, but cannot validate as no secret is configured");
+            return;
+        }
+
+        var hmac         = crypto.createHmac('sha1', config.secret);
+        var recieved_sig = req.headers['x-hub-signature'].split('=')[1];
+        var computed_sig = hmac.update(buffer).digest('hex');
+
+        if(recieved_sig != computed_sig){
+            console.warn('Recieved an invalid HMAC: calculated:' + computed_sig + ' != recieved:' + recieved_sig);
+            var err = new Error('Invalid Signature');
+            err.status = 403;
+            throw err;
+        }
+    }
+
+}));
 
 // Receive webhook post
 app.post('/hooks/jekyll/:branch', function(req, res) {
@@ -20,7 +44,7 @@ app.post('/hooks/jekyll/:branch', function(req, res) {
 
     // Queue request handler
     tasks.defer(function(req, res, cb) {
-        var data = JSON.parse(req.body.payload);
+        var data = req.body;
         var branch = req.params.branch;
         var params = [];
 
@@ -47,7 +71,14 @@ app.post('/hooks/jekyll/:branch', function(req, res) {
         /* repo   */ params.push(data.repo);
         /* branch */ params.push(data.branch);
         /* owner  */ params.push(data.owner);
-        /* giturl */ params.push('git@' + config.gh_server + ':' + data.owner + '/' + data.repo + '.git');
+
+        /* giturl */
+        if (config.public_repo) {
+            params.push('https://' + config.gh_server + '/' + data.owner + '/' + data.repo + '.git');
+        } else {
+            params.push('git@' + config.gh_server + ':' + data.owner + '/' + data.repo + '.git');
+        }
+
         /* source */ params.push(config.temp + '/' + data.owner + '/' + data.repo + '/' + data.branch + '/' + 'code');
         /* build  */ params.push(config.temp + '/' + data.owner + '/' + data.repo + '/' + data.branch + '/' + 'site');
 
@@ -73,7 +104,7 @@ app.post('/hooks/jekyll/:branch', function(req, res) {
 
                 // Done running scripts
                 console.log('Successfully rendered: ' + data.owner + '/' + data.repo);
-                send('Your website at ' + data.owner + '/' + data.repo + ' was succesfully published.', 'Succesfully published site', data);
+                send('Your website at ' + data.owner + '/' + data.repo + ' was successfully published.', 'Successfully published site', data);
 
                 if (typeof cb === 'function') cb();
                 return;
@@ -105,13 +136,15 @@ function run(file, params, cb) {
 }
 
 function send(body, subject, data) {
-    if (config.email && data.pusher.email) {
-        var message = {
-            text: body,
-            from: config.email.user,
-            to: data.pusher.email,
-            subject: subject
-        };
-        mailer.send(message, function(err) { if (err) console.warn(err); });
+    if (config.email.isActivated) {
+        if (config.email && data.pusher.email) {
+            var message = {
+                text: body,
+                from: config.email.user,
+                to: data.pusher.email,
+                subject: subject
+            };
+            mailer.send(message, function(err) { if (err) console.warn(err); });
+        }
     }
 }
